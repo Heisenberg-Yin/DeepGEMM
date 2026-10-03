@@ -60,6 +60,8 @@ try:
         einsum,
         fp8_einsum,
         # Attention kernels
+        get_paged_mqa_logits_bf16_metadata,
+        fp4_paged_mqa_logits_bf16,
         fp8_fp4_mqa_logits,
         get_paged_mqa_logits_metadata,
         fp8_fp4_paged_mqa_logits,

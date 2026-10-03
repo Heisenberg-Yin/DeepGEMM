@@ -197,6 +197,9 @@ The library also provides some environment variables, which may be useful:
 
 For additional examples and details, please refer to [the test code](tests/test_core.py) or review the corresponding Python documentation.
 
+The optional SM100 MXFP4 producer with exact BF16 score histograms and automatic
+Q4/Q6 routing is documented in [Paired BF16 paged MQA](docs/mqa_bf16.md).
+
 ## Acknowledgement
 
 DeepGEMM is inspired by the [CUTLASS](https://github.com/nvidia/cutlass) project. Thanks and respect to the developers!
