@@ -68,6 +68,8 @@ from ._C import (
     fp8_einsum,
     # Attention kernels
     paged_mqa_logits_histogram_version,
+    get_paged_mqa_logits_bf16_metadata,
+    fp4_paged_mqa_logits_bf16,
     fp8_fp4_mqa_logits,
     get_mqa_logits_metadata,
     get_paged_mqa_logits_metadata,
