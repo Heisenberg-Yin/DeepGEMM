@@ -47,14 +47,15 @@ static torch::Tensor fp4_paged_mqa_logits_bf16(const std::pair<torch::Tensor, to
                                               int tokens_per_request) {
     const auto& [q_fp, q_sf] = q;
     const auto device = q_fp.device();
-    const mqa_bf16::Config config(tokens_per_request, histogram.has_value());
+    const mqa_bf16::Config config(tokens_per_request, histogram.has_value(), weights.scalar_type() == torch::kFloat);
     DG_HOST_ASSERT(jit->device.get_arch_major() == 10 and q_fp.is_cuda());
     DG_HOST_ASSERT(q_fp.dim() == 4 and q_fp.size(1) == 1 and q_fp.size(2) == 32 and q_fp.size(3) == 64);
     DG_HOST_ASSERT(q_fp.scalar_type() == kPackedFP4 and q_fp.is_contiguous());
     const int rows = q_fp.size(0);
     check_bf16_int_tensor(q_sf, device);
     DG_HOST_ASSERT(q_sf.dim() == 3 and q_sf.size(0) == rows and q_sf.size(1) == 1 and q_sf.size(2) == 32);
-    DG_HOST_ASSERT(weights.is_cuda() and weights.device() == device and weights.scalar_type() == torch::kBFloat16);
+    DG_HOST_ASSERT(weights.is_cuda() and weights.device() == device);
+    DG_HOST_ASSERT(weights.scalar_type() == torch::kBFloat16 or weights.scalar_type() == torch::kFloat);
     DG_HOST_ASSERT(weights.dim() == 2 and weights.size(0) == rows and weights.size(1) == 32);
     DG_HOST_ASSERT(weights.stride(1) == 1 and weights.stride(0) % 8 == 0);
     DG_HOST_ASSERT(reinterpret_cast<uintptr_t>(weights.data_ptr()) % 16 == 0);
@@ -89,7 +90,7 @@ static torch::Tensor fp4_paged_mqa_logits_bf16(const std::pair<torch::Tensor, to
     }
     // LCM(384, 512): whole KV splits and 1024-byte aligned BF16 rows.
     const int stride = align(max_context_len, 1536);
-    auto logits = torch::empty({rows, stride}, weights.options()).slice(1, 0, max_context_len);
+    auto logits = torch::empty({rows, stride}, weights.options().dtype(torch::kBFloat16)).slice(1, 0, max_context_len);
     if (rows > 0 and max_context_len > 0)
         mqa_bf16::paged(config, q_fp, q_sf, kv, sf_kv, weights, context_lens, block_table, ids,
                          schedule_meta, logits, hist_ptr);

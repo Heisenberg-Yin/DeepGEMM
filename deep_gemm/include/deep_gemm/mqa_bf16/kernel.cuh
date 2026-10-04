@@ -55,7 +55,8 @@ template <uint32_t kNumHeads, uint32_t kHeadDim,
           uint32_t kNumQStages, uint32_t kNumKVStages, uint32_t kNumTmemStages,
           uint32_t kNumSpecializedThreads, uint32_t kNumMathThreads,
           typename qk_dtype_t, typename MakeScheduler,
-          uint32_t kNumMathWarpGroups = kNumMathThreads / 128, typename Histogram = epilogue::NoHistogram>
+          uint32_t kNumMathWarpGroups = kNumMathThreads / 128, typename Histogram = epilogue::NoHistogram,
+          typename weight_dtype_t = nv_bfloat16>
 CUTLASS_DEVICE void sm100_mqa_logits_core_impl(const uint32_t logits_stride,
                                                nv_bfloat16* logits,
                                                const cute::TmaDescriptor& tensor_map_q,
@@ -82,7 +83,7 @@ CUTLASS_DEVICE void sm100_mqa_logits_core_impl(const uint32_t logits_stride,
     }
 
     using SharedStorage = layout::MQALogitsSharedStorage<kNumHeads, kHeadDim, BLOCK_Q, SPLIT_KV, UMMA_N,
-                                                         kNumQStages, kNumKVStages, kNumTmemStages, qk_dtype_t>;
+                                                         kNumQStages, kNumKVStages, kNumTmemStages, qk_dtype_t, weight_dtype_t>;
     extern __shared__ __align__(SharedStorage::kSwizzleAlignment) uint8_t smem_buffer[];
     auto& smem = *reinterpret_cast<SharedStorage*>(smem_buffer);
 
@@ -467,12 +468,16 @@ CUTLASS_DEVICE void sm100_mqa_logits_core_impl(const uint32_t logits_stride,
                 #pragma unroll
                 for (uint32_t i = 0; i < kNumValidTokens; ++ i) {
                     const auto smem_weights_row = smem.smem_weights[q_stage_idx] + i * kNumWeightElementsPerRow;
-                    // Load two bf16 weights at a time as one packed shared u32
-                    const auto packed_row = reinterpret_cast<const uint32_t*>(smem_weights_row);
                     #pragma unroll
                     for (uint32_t j = 0; j < kNumHeads / 2; ++ j) {
-                        const auto packed = ptx::ld_shared(packed_row + j);
-                        weights[i][j] = *reinterpret_cast<const nv_bfloat162*>(&packed);
+                        if constexpr (cute::is_same_v<weight_dtype_t, float>) {
+                            // Match an explicit FP32 -> BF16 cast before the producer.
+                            const auto pair = ptx::ld_shared(reinterpret_cast<const float2*>(smem_weights_row) + j);
+                            weights[i][j] = __floats2bfloat162_rn(pair.x, pair.y);
+                        } else {
+                            const auto packed = ptx::ld_shared(reinterpret_cast<const uint32_t*>(smem_weights_row) + j);
+                            weights[i][j] = *reinterpret_cast<const nv_bfloat162*>(&packed);
+                        }
                     }
                 }
 
@@ -559,6 +564,7 @@ template <uint32_t kNumHeads, uint32_t kHeadDim, uint32_t PAGE_KV,
           uint32_t SPLIT_KV, uint32_t kSplitsPerChunk,
           uint32_t kNumSpecializedThreads, uint32_t kNumMathThreads,
           typename qk_dtype_t, bool kWithHistogram = false, bool kSwizzleHistogram = false,
+          typename weight_dtype_t = nv_bfloat16,
           uint32_t kNumMathWarpGroups = kNumMathThreads / 128>
 CUTLASS_GLOBAL __launch_bounds__(kNumSpecializedThreads + kNumMathThreads, 1)
 void sm100_paged_mqa_logits(const uint32_t num_q_tokens_total,
@@ -591,7 +597,7 @@ void sm100_paged_mqa_logits(const uint32_t num_q_tokens_total,
                                BLOCK_Q, SPLIT_KV,
                                UMMA_N, kNumQStages, kNumKVStages, kNumTmemStages,
                                kNumSpecializedThreads, kNumMathThreads, qk_dtype_t,
-                               decltype(make_scheduler), kNumMathWarpGroups, Histogram>(
+                               decltype(make_scheduler), kNumMathWarpGroups, Histogram, weight_dtype_t>(
         logits_stride, logits,
         tensor_map_q, tensor_map_sf_q, tensor_map_kv, tensor_map_sf_kv, tensor_map_weights,
         make_scheduler, emit);

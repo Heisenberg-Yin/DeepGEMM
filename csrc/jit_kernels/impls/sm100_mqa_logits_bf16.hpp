@@ -14,24 +14,29 @@ namespace deep_gemm::mqa_bf16 {
 // runs and causal lengths remain on the device.
 struct Config {
     int block_q, num_tmem_stages, num_kv_stages;
-    bool histogram, swizzle;
+    bool histogram, swizzle, fp32_weights;
     static constexpr int split_kv = 384;
 
-    Config(int tokens_per_request, bool histogram):
+    Config(int tokens_per_request, bool histogram, bool fp32_weights = false):
         block_q(tokens_per_request >= 5 ? 6 : 4),
         num_tmem_stages(tokens_per_request >= 5 ? 2 : 3),
         num_kv_stages(tokens_per_request >= 5 or histogram ? 7 : 8),
-        histogram(histogram), swizzle(tokens_per_request == 6) {
+        histogram(histogram), swizzle(tokens_per_request == 6), fp32_weights(fp32_weights) {
         DG_HOST_ASSERT(tokens_per_request >= 1 and tokens_per_request <= 6);
     }
 
-    int storage_size() const {
+    template <typename Weight>
+    int storage_size_for() const {
         using FP4 = cutlass::float_e2m1_t;
         if (block_q == 6)
-            return sizeof(layout::MQALogitsSharedStorage<32, 128, 6, 384, 192, 2, 7, 2, FP4>);
+            return sizeof(layout::MQALogitsSharedStorage<32, 128, 6, 384, 192, 2, 7, 2, FP4, Weight>);
         if (num_kv_stages == 7)
-            return sizeof(layout::MQALogitsSharedStorage<32, 128, 4, 384, 128, 2, 7, 3, FP4>);
-        return sizeof(layout::MQALogitsSharedStorage<32, 128, 4, 384, 128, 2, 8, 3, FP4>);
+            return sizeof(layout::MQALogitsSharedStorage<32, 128, 4, 384, 128, 2, 7, 3, FP4, Weight>);
+        return sizeof(layout::MQALogitsSharedStorage<32, 128, 4, 384, 128, 2, 8, 3, FP4, Weight>);
+    }
+
+    int storage_size() const {
+        return fp32_weights ? storage_size_for<float>() : storage_size_for<nv_bfloat16>();
     }
 
     int smem_size() const {
@@ -85,15 +90,16 @@ static void paged(const Config& c, const torch::Tensor& q, const torch::Tensor& 
     const auto kernel = jit->compile("sm100_paged_mqa_logits_bf16", std::format(R"(
 #include <deep_gemm/mqa_bf16/kernel.cuh>
 using namespace deep_gemm::mqa_bf16;
-static_assert(sizeof(layout::MQALogitsSharedStorage<32, 128, {}, 384, {}, 2, {}, {}, cutlass::float_e2m1_t>) == {});
+static_assert(sizeof(layout::MQALogitsSharedStorage<32, 128, {}, 384, {}, 2, {}, {}, cutlass::float_e2m1_t, {}>) == {});
 static void __instantiate_kernel() {{
     auto ptr = reinterpret_cast<void*>(&sm100_paged_mqa_logits<
-        32, 128, 128, {}, {}, 2, {}, {}, 384, {}, 128, 384, cutlass::float_e2m1_t, {}, {}
+        32, 128, 128, {}, {}, 2, {}, {}, 384, {}, 128, 384, cutlass::float_e2m1_t, {}, {}, {}
     >);
 }}
-)", c.block_q, c.block_q * 32, c.num_kv_stages, c.num_tmem_stages, c.storage_size(),
+)", c.block_q, c.block_q * 32, c.num_kv_stages, c.num_tmem_stages,
+    c.fp32_weights ? "float" : "nv_bfloat16", c.storage_size(),
     c.block_q, c.block_q * 32, c.num_kv_stages, c.num_tmem_stages, c.num_kv_stages,
-    c.histogram, c.swizzle));
+    c.histogram, c.swizzle, c.fp32_weights ? "float" : "nv_bfloat16"));
     jit->launch(
         kernel, {
             .num_smem_bytes = c.smem_size(),

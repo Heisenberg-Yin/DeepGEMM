@@ -31,7 +31,8 @@ def histogram_reference(scores, lens):
 
 @pytest.mark.parametrize("n", range(1, 7))
 @pytest.mark.parametrize("pdl", [False, True])
-def test_exact_histogram_graph(n, pdl):
+@pytest.mark.parametrize("weight_dtype", [torch.bfloat16, torch.float32])
+def test_exact_histogram_graph(n, pdl, weight_dtype):
     torch.manual_seed(321 + n)
     rows, width, pages = 3 * n, 32768, 256
     q = torch.randint(0, 256, (rows, 1, 32, 64), device="cuda", dtype=torch.uint8).view(
@@ -43,7 +44,7 @@ def test_exact_histogram_graph(n, pdl):
     )
     cache[:, 128 * 64 :] = 125
     cache = cache.view(-1, 128, 1, 68)
-    weights = torch.randn((rows, 32), device="cuda", dtype=torch.bfloat16)
+    weights = torch.randn((rows, 32), device="cuda", dtype=weight_dtype)
     weights[0].fill_(float("nan"))
     weights[-1].zero_()
     ids = torch.arange(rows, device="cuda", dtype=torch.int32) // n
@@ -52,14 +53,14 @@ def test_exact_histogram_graph(n, pdl):
     lens = torch.full((rows, 1), width, device="cuda", dtype=torch.int32)
     hist = torch.zeros((rows, 1024), device="cuda", dtype=torch.int32)
 
-    def produce(histogram=None):
+    def produce(histogram=None, weight_arg=weights):
         schedule = dg.get_paged_mqa_logits_bf16_metadata(
             lens, 128, dg.get_num_sms(), indices=ids, tokens_per_request=n
         )
         return dg.fp4_paged_mqa_logits_bf16(
             (q, sf),
             cache,
-            weights,
+            weight_arg,
             lens,
             table,
             schedule,
@@ -74,6 +75,9 @@ def test_exact_histogram_graph(n, pdl):
     try:
         produce(hist)
         plain = produce()
+        rounded = produce(weight_arg=weights.bfloat16())
+        assert plain.dtype == torch.bfloat16
+        assert torch.equal(plain.view(torch.int16), rounded.view(torch.int16))
         assert torch.equal(hist, histogram_reference(plain, lens))
         produce(hist)
         assert torch.equal(hist, 2 * histogram_reference(plain, lens))
@@ -109,5 +113,6 @@ if __name__ == "__main__":
     else:
         for use_pdl in (False, True):
             for next_n in range(1, 7):
-                test_exact_histogram_graph(next_n, use_pdl)
-        print("12 cases passed")
+                for weight_dtype in (torch.bfloat16, torch.float32):
+                    test_exact_histogram_graph(next_n, use_pdl, weight_dtype)
+        print("24 cases passed")

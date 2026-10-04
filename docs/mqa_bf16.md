@@ -25,7 +25,10 @@ Input contract:
   int32 `[rows, 1, 32]`. Both are contiguous.
 - KV is the existing page layout, uint8 `[pages, 128, 1, 68]`: each page
   stores all 128 packed 64-byte payloads, then all 128 four-byte scales.
-- Weights are BF16 `[rows, 32]`, with contiguous heads and 16-byte row alignment.
+- Weights are BF16 or FP32 `[rows, 32]`, with contiguous heads, a row stride divisible
+  by eight elements, and a 16-byte aligned base pointer. FP32 weights are rounded to BF16 in the producer, identically to
+  an explicit `weights.to(torch.bfloat16)` before the call. The capability flag
+  `paged_mqa_logits_bf16_fp32_weights` advertises this support.
 - Causal lengths are contiguous int32 `[rows, 1]`, each in
   `[0, max_context_len]`. Pages are int32 `[rows, ceil(max_context_len / 128)]`
   or wider, with contiguous columns.
@@ -55,9 +58,11 @@ canonicalize signed zero, and exclude NaNs. It preserves the paired SGLang
 BF16 selector's encoding. No output scores are dropped or replaced by block
 maxima.
 
-For CUDA graphs, warm up the API first and capture schedule generation before
-the producer. Replay then reads live lengths and request IDs. Keep shapes,
-addresses and CPU hint fixed for a captured graph.
+For CUDA graphs, warm up the API first. Generate the schedule from live lengths
+and request IDs before every replay, copying it into stable storage, or capture
+schedule generation before the producer. Layers sharing the same lengths, IDs
+and CPU hint can reuse that schedule within a forward. Keep shapes, addresses
+and the CPU hint fixed for a captured graph.
 
 The paired vLLM selector returns the exact top-512 of these BF16 scores,
 preferring lower request-local logical indices for ties and padding with `-1`.

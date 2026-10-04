@@ -629,6 +629,7 @@ static torch::Tensor fp8_paged_mqa_logits(const torch::Tensor& q,
 }
 static void register_apis(pybind11::module_& m) {
     m.attr("paged_mqa_logits_histogram_version") = 1;
+    m.attr("paged_mqa_logits_bf16_fp32_weights") = true;
     m.def("get_paged_mqa_logits_bf16_metadata", &get_paged_mqa_logits_bf16_metadata,
           py::arg("context_lens"), py::arg("block_kv"), py::arg("num_sms"),
           py::arg("indices") = std::nullopt, py::arg("tokens_per_request") = 1);
