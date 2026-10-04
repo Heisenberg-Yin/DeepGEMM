@@ -66,6 +66,9 @@ def test_histogram_live_scores_and_graph(n, varlen):
     for length in (0, 1, 255, 256, 257, 8191):
         lens.copy_((length - n + 1 + torch.arange(rows, device="cuda").int() % n)
                    .clamp_min(0).view_as(lens))
+        if varlen:
+            # Split request runs on replay, including partial Q blocks at the tail.
+            ids.copy_(torch.arange(rows, device="cuda").int() // (n if length % 2 else 1))
         graph.replay()
         plain = produce()
         live = torch.arange(width, device="cuda")[None, :] < lens.view(-1, 1)

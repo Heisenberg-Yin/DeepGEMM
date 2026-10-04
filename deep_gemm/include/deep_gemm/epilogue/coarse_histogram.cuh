@@ -10,6 +10,7 @@ namespace deep_gemm::epilogue {
 struct NoHistogram {
     static constexpr bool kEnabled = false;
     static constexpr uint32_t kNumSlots = 1;
+    static constexpr bool kVariableSlots = false;
 };
 
 // Adds this thread's bins to a global row. Thread t owns the bin pairs (2t, 2t + 1) + i * 2 * kMathThreads: one warp
@@ -36,12 +37,13 @@ CUTLASS_DEVICE void flush_coarse_histogram(int* local, int* global, const int& r
 
 // A CTA moves to its next request: publish the finished rows (one slot per token) and clear them
 template <uint32_t kBins, uint32_t kMathThreads, uint32_t kSlots>
-__device__ __noinline__ void switch_coarse_histogram_row(int* local, int* global, int row) {
+__device__ __noinline__ void switch_coarse_histogram_row(int* local, int* global, int row, uint32_t num_slots = kSlots) {
     cutlass::arch::NamedBarrier(kMathThreads, 1).sync();
     if (row >= 0) {
         #pragma unroll
         for (uint32_t slot = 0; slot < kSlots; ++ slot)
-            flush_coarse_histogram<kBins, kMathThreads, true>(local + slot * kBins, global, row + static_cast<int>(slot));
+            if (slot < num_slots)
+                flush_coarse_histogram<kBins, kMathThreads, true>(local + slot * kBins, global, row + static_cast<int>(slot));
     }
     cutlass::arch::NamedBarrier(kMathThreads, 1).sync();
 }
@@ -114,9 +116,10 @@ struct CoarseHistogramPair {
 // Counts only live non-NaN scores. Caller owns zero-at-entry/consumer-reset of global bins.
 // kSlots > 1: the kSlots tokens of one request (a verify step) share every KV split, so each token keeps its own
 // bins and the CTA only publishes when it moves to the next request. `current_row` is the request's first row.
-template <uint32_t kBins, uint32_t kMathThreads, uint32_t kSlots = 1>
+template <uint32_t kBins, uint32_t kMathThreads, uint32_t kSlots = 1, bool kVarlen = false>
 struct CoarseHistogram {
     static constexpr uint32_t kNumSlots = kSlots;
+    static constexpr bool kVariableSlots = kVarlen;
     static constexpr bool kEnabled = true;
     static_assert(kBins == 1024 and kBins % (2 * kMathThreads) == 0 and kSlots >= 1);
     int* global;
@@ -126,6 +129,7 @@ struct CoarseHistogram {
     uint32_t num_rows;
     int* local = nullptr;
     int current_row = -1;
+    uint32_t current_slots = kSlots;
     uint32_t current_length[kSlots] = {};
     uint32_t min_limit = 0;  // columns below it are live for every token of the request
 
@@ -133,16 +137,17 @@ struct CoarseHistogram {
         min_limit = logits_stride;
         #pragma unroll
         for (uint32_t slot = 0; slot < kSlots; ++ slot) {
-            current_length[slot] = lengths[first_row + slot];
+            current_length[slot] = slot < current_slots ? lengths[first_row + slot] : 0;
             min_limit = min(min_limit, current_length[slot]);
         }
     }
 
     // Request ownership changes only at Q-block boundaries, never inside the KV split loop.
-    CUTLASS_DEVICE void prepare(uint32_t first_row) {
+    CUTLASS_DEVICE void prepare(uint32_t first_row, uint32_t num_slots = kSlots) {
         if (static_cast<int>(first_row) != current_row) {
-            switch_coarse_histogram_row<kBins, kMathThreads, kSlots>(local, global, current_row);
+            switch_coarse_histogram_row<kBins, kMathThreads, kSlots>(local, global, current_row, current_slots);
             current_row = static_cast<int>(first_row);
+            current_slots = num_slots;
             load_lengths(first_row);
         }
     }
@@ -222,9 +227,11 @@ struct CoarseHistogram {
         local = scratch;
         // The CTA starts at its scheduled token, which is its first row: load the lengths off the score path
         const uint32_t first_row = schedule_meta[blockIdx.x * 2];
-        if (first_row < num_rows) {
-            current_row = static_cast<int>(first_row);
-            load_lengths(first_row);
+        if constexpr (not kVarlen) {
+            if (first_row < num_rows) {
+                current_row = static_cast<int>(first_row);
+                load_lengths(first_row);
+            }
         }
         for (uint32_t bin = math_thread_idx; bin < kSlots * kBins; bin += kMathThreads)
             local[bin] = 0;
@@ -250,7 +257,8 @@ struct CoarseHistogram {
         if (current_row >= 0) {
             #pragma unroll
             for (uint32_t slot = 0; slot < kSlots; ++ slot)
-                flush_coarse_histogram<kBins, kMathThreads, false>(local + slot * kBins, global, current_row + static_cast<int>(slot));
+                if (slot < current_slots)
+                    flush_coarse_histogram<kBins, kMathThreads, false>(local + slot * kBins, global, current_row + static_cast<int>(slot));
         }
     }
 };

@@ -324,9 +324,6 @@ static void sm100_paged_mqa_logits(const torch::Tensor& q,
     const int num_math_threads = 2 * 128;
     DG_HOST_ASSERT(split_kv == 256 and logits_stride % split_kv == 0);
 
-    // The histogram keeps one 1024-bin slot per token of a verify Q block; 4 slots need the Q ring cut to 2 stages
-    const int num_histogram_slots = histogram == nullptr ? 0 : (is_varlen ? 1 : tokens_per_request);
-    const int num_q_stages = num_histogram_slots > 3 ? 2 : 3;
     // Match contiguous-KV pipeline depth.
     const int num_kv_stages = is_fp4 ? 10 : 5;
     DG_HOST_ASSERT(num_heads > 0 and num_heads <= 128 and num_heads % 4 == 0);
@@ -334,6 +331,9 @@ static void sm100_paged_mqa_logits(const torch::Tensor& q,
     const bool token_q_tile = use_token_q_tile(tokens_per_request, num_heads, head_dim, is_varlen, is_mx_sf, qk_dtype,
                                                weights.scalar_type());
     const int block_q = token_q_tile ? tokens_per_request : 128 / num_heads;
+    // Keep each row's bins across all KV splits, including varlen Q blocks.
+    const int num_histogram_slots = histogram == nullptr ? 0 : (is_varlen ? block_q : tokens_per_request);
+    const int num_q_stages = num_histogram_slots > 3 ? 2 : 3;
 
     // MX SF formats consume `sf_q`; FP8 fills that descriptor slot with KV scales
     CUtensorMap tensor_map_q, tensor_map_sf_q, tensor_map_kv, tensor_map_sf_kv;

@@ -399,8 +399,12 @@ CUTLASS_DEVICE void sm100_mqa_logits_core_impl(const uint32_t logits_stride,
             CUTE_TIE_DECL(q_pipeline.advance(), q_stage_idx, q_phase);
             smem.full_q_barriers[q_stage_idx].wait(q_phase);
 
-            if constexpr (Histogram::kEnabled and Histogram::kNumSlots > 1)
-                histogram.prepare(scheduler.get_logits_row(q_block_idx, 0));
+            if constexpr (Histogram::kEnabled and Histogram::kNumSlots > 1) {
+                if constexpr (Histogram::kVariableSlots)
+                    histogram.prepare(scheduler.get_logits_row(q_block_idx, 0), scheduler.get_num_block_tokens(q_block_idx));
+                else
+                    histogram.prepare(scheduler.get_logits_row(q_block_idx, 0));
+            }
 
             const auto process_q_block = [&](auto num_valid_tokens_t) {
                 constexpr uint32_t kNumValidTokens = decltype(num_valid_tokens_t)::value;
@@ -544,7 +548,7 @@ CUTLASS_DEVICE void sm100_mqa_logits_core_impl(const uint32_t logits_stride,
                 }
             };
 
-            if constexpr (Histogram::kEnabled and Histogram::kNumSlots > 1)
+            if constexpr (Histogram::kEnabled and Histogram::kNumSlots > 1 and not Histogram::kVariableSlots)
                 process_q_block(cute::Int<Histogram::kNumSlots>{});  // verify: every Q block holds exactly next_n tokens
             else if constexpr (decltype(scheduler)::kHasPartialBlock)
                 dispatch_num_block_tokens<BLOCK_Q>(scheduler.get_num_block_tokens(q_block_idx), process_q_block);
@@ -647,7 +651,7 @@ void sm100_paged_mqa_logits(const uint32_t num_q_tokens_total,
                      cute::is_same_v<logits_dtype_t, float>), "Histogram variant needs FP8 Q1/H32/D128 and FP32 logits");
     // Without indices a request's next_n tokens share one Q block: each token counts into its own slot
     using Histogram = cute::conditional_t<kWithHistogram,
-                                          epilogue::CoarseHistogram<1024, kNumMathThreads, kIsVarlen ? 1 : kTokensPerRequest>,
+                                          epilogue::CoarseHistogram<1024, kNumMathThreads, kIsVarlen ? BLOCK_Q : kTokensPerRequest, kIsVarlen>,
                                           epilogue::NoHistogram>;
     Histogram emit{};
     if constexpr (kWithHistogram)
